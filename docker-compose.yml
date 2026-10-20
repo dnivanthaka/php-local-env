@@ -3,6 +3,9 @@ services:
     build:
       context: .                  # Look inside local-env for the Dockerfile
       dockerfile: backend.Dockerfile
+    user: "${CURRENT_UID}:${CURRENT_GID}"
+    ports:
+      - "5173:5173"
     volumes:
       - ../backend:/var/www/html  # Map to the external peer backend directory
     networks:
@@ -26,6 +29,8 @@ services:
 
   mysql:
     image: mysql:8.0
+    ports:
+      - "3306:3306"
     environment:
       MYSQL_DATABASE: ${DB_DATABASE}
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}

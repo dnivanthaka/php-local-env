@@ -7,6 +7,9 @@ set -e
 BACKEND_DIR="../backend"
 FRONTEND_DIR="../frontend"
 
+export CURRENT_UID=$(id -u)
+export CURRENT_GID=$(id -g)
+
 # Visual helpers
 info() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
 success() { echo -e "\033[1;32m[SUCCESS]\033[0m $1"; }
@@ -20,6 +23,8 @@ apply_permissions() {
     
     # Check if container is up before applying internal write modes
     if [ "$(docker compose ps -q app)" ]; then
+        # Ensure directories exist before changing permissions
+        docker compose exec -T app mkdir -p storage bootstrap/cache
         docker compose exec -T app chmod -R 777 storage bootstrap/cache
     fi
 }
@@ -75,16 +80,51 @@ EOF
     build)
         info "Executing a clean full-stack compilation build..."
         docker compose up -d --build
+        # --- AUTO-HEAL: If folder is empty, install fresh Laravel + React + Inertia ---
+        if [ ! -f "$BACKEND_DIR/artisan" ]; then
+            info "Empty backend directory detected! Bootstrapping fresh Laravel installation..."
+            
+            # Clean out any hidden system files/folders (.git, .DS_Store, etc.) to satisfy Composer
+            docker compose exec -T app sh -c "rm -rf /var/www/html/* /var/www/html/.[!.]* /var/www/html/..?*" || true
+            
+            # Run composer project creation
+            docker compose exec -T app composer create-project laravel/laravel .
+            
+            info "Installing Laravel Breeze Scaffolding..."
+            docker compose exec -T app composer require laravel/breeze --dev
+            
+            info "Configuring React with Inertia.js stack..."
+            docker compose exec -T app php artisan breeze:install react --dark || true
+            
+            info "Syncing temporary root permissions to allow file injection..."
+            sudo chown -R $USER:$USER "$BACKEND_DIR"
+            chmod -R 775 "$BACKEND_DIR"
+
+            info "Writing fallback bootstrap.js configurations..."
+            mkdir -p "$BACKEND_DIR/resources/js"
+            cat << 'EOF' > "$BACKEND_DIR/resources/js/bootstrap.js"
+import axios from 'axios';
+window.axios = axios;
+window.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
+EOF
+
+            info "Resolving Node dependency trees cleanly with legacy override..."
+            docker compose exec -T app npm install --legacy-peer-deps
+            docker compose exec -T app npm run build
+        fi
+
+        # ----------------------------------------------------------------------------
+
         apply_permissions
         
-        # Auto-run install steps if the Pest testing binary doesn't exist yet [1]
+        # Auto-run install steps if the Pest testing binary doesn't exist yet
         if [ ! -f "$BACKEND_DIR/vendor/bin/pest" ]; then
             info "Detecting missing or broken testing binaries. Automating tool installations..."
             "$0" install
         fi
         
         info "Waiting for MySQL to boot and accept connections..."
-        until docker compose exec -T mysql mysqladmin ping -h"127.0.0.1" --silent; do
+        until docker compose exec -T mysql mysqladmin ping -h"127.0.0.1" --silent 2>/dev/null; do
             echo -n "."
             sleep 1
         done
@@ -94,6 +134,8 @@ EOF
         if [ ! -f "$BACKEND_DIR/.env" ] && [ -f "$BACKEND_DIR/.env.example" ]; then
             cp "$BACKEND_DIR/.env.example" "$BACKEND_DIR/.env"
             info "Created initial backend .env layout from template."
+            # Set DB_HOST to mysql to match docker network service naming
+            sed -i 's/DB_HOST=127.0.0.1/DB_HOST=mysql/g' "$BACKEND_DIR/.env" || true
         fi
         
         docker compose exec -T app php artisan key:generate --ansi || true
